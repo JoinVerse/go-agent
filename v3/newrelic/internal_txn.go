@@ -78,15 +78,42 @@ func (txn *txn) markEnd(now time.Time, thread *tracingThread) {
 	}
 }
 
-func newTxn(app *app, run *appRun, name string) *thread {
+func (txn *txn) setOption(opts ...TraceOption) {
+	txnOpts := traceOptSet{}
+	for _, o := range opts {
+		o(&txnOpts)
+	}
+
+	// If we are suppressing code-level metrics but had already set up to report them,
+	// remove those attributes now entirely. We've already spent the time to collect
+	// the data, but that's water under the bridge at this point and the user is saying
+	// explicitly they don't want them.
+	if txnOpts.SuppressCLM {
+		removeCodeLevelMetrics(txn.Attrs.Agent.Remove)
+	} else if txn.appRun != nil && txn.appRun.Config.CodeLevelMetrics.Enabled && (txn.appRun.Config.CodeLevelMetrics.Scope == 0 || (txn.appRun.Config.CodeLevelMetrics.Scope&TransactionCLM) != 0) {
+		// If we're given an explicit code location to report, do that now. This will override
+		// any previous code-level metrics information in the transaction.
+		reportCodeLevelMetrics(txnOpts, txn.appRun, txn.Attrs.Agent.Add)
+	}
+}
+
+func newTxn(app *app, run *appRun, name string, opts ...TraceOption) *thread {
 	txn := &txn{
 		app:    app,
 		appRun: run,
+	}
+	txnOpts := traceOptSet{}
+	for _, o := range opts {
+		o(&txnOpts)
 	}
 	txn.markStart(time.Now())
 
 	txn.Name = name
 	txn.Attrs = newAttributes(run.AttributeConfig)
+
+	if !txnOpts.SuppressCLM && run.Config.CodeLevelMetrics.Enabled && (txnOpts.DemandCLM || run.Config.CodeLevelMetrics.Scope == 0 || (run.Config.CodeLevelMetrics.Scope&TransactionCLM) != 0) {
+		reportCodeLevelMetrics(txnOpts, run, txn.Attrs.Agent.Add)
+	}
 
 	if run.Config.DistributedTracer.Enabled {
 		txn.BetterCAT.Enabled = true
@@ -226,6 +253,17 @@ func (thd *thread) SetWebResponse(w http.ResponseWriter) http.ResponseWriter {
 	})
 }
 
+func (thd *thread) StoreLog(log *logEvent) {
+	txn := thd.txn
+	txn.Lock()
+	defer txn.Unlock()
+
+	if txn.logs == nil {
+		txn.logs = make(logEventHeap, 0, internal.MaxLogEvents)
+	}
+	txn.logs.Add(log)
+}
+
 func (txn *txn) freezeName() {
 	if txn.ignore || ("" != txn.FinalName) {
 		return
@@ -261,6 +299,13 @@ func (txn *txn) MergeIntoHarvest(h *harvest) {
 
 	createTxnMetrics(&txn.txnData, h.Metrics)
 	mergeBreakdownMetrics(&txn.txnData, h.Metrics)
+
+	// Dump log events into harvest
+	// Note: this will create a surge of log events that could affect sampling.
+	for _, logEvent := range txn.logs {
+		logEvent.priority = priority
+		h.LogEvents.Add(&logEvent)
+	}
 
 	if txn.Config.TransactionEvents.Enabled {
 		// Allocate a new TxnEvent to prevent a reference to the large transaction.
@@ -321,7 +366,7 @@ func headersJustWritten(thd *thread, code int, hdr http.Header) {
 	if txn.appRun.responseCodeIsError(code) {
 		e := txnErrorFromResponseCode(time.Now(), code)
 		e.Stack = getStackTrace()
-		thd.noticeErrorInternal(e)
+		thd.noticeErrorInternal(e, false)
 	}
 }
 
@@ -380,7 +425,7 @@ func (thd *thread) End(recovered interface{}) error {
 	if nil != recovered {
 		e := txnErrorFromPanic(time.Now(), recovered)
 		e.Stack = getStackTrace()
-		thd.noticeErrorInternal(e)
+		thd.noticeErrorInternal(e, false)
 		log.Println(string(debug.Stack()))
 	}
 
@@ -402,7 +447,7 @@ func (thd *thread) End(recovered interface{}) error {
 	txn.ApdexThreshold = internal.CalculateApdexThreshold(txn.Reply, txn.FinalName)
 
 	if txn.getsApdex() {
-		if txn.HasErrors() {
+		if txn.HasErrors() && txn.NoticeErrors() {
 			txn.Zone = apdexFailing
 		} else {
 			txn.Zone = calculateApdexZone(txn.ApdexThreshold, txn.Duration)
@@ -416,7 +461,7 @@ func (thd *thread) End(recovered interface{}) error {
 			"name":          txn.FinalName,
 			"duration_ms":   txn.Duration.Seconds() * 1000.0,
 			"ignored":       txn.ignore,
-			"app_connected": "" != txn.Reply.RunID,
+			"app_connected": txn.Reply.RunID != "",
 		})
 	}
 
@@ -514,10 +559,16 @@ const (
 	securityPolicyErrorMsg = "message removed by security policy"
 )
 
-func (thd *thread) noticeErrorInternal(err errorData) error {
+func (thd *thread) noticeErrorInternal(err errorData, expect bool) error {
 	txn := thd.txn
 	if !txn.Config.ErrorCollector.Enabled {
 		return errorsDisabled
+	}
+
+	if !expect {
+		thd.noticeErrors = true
+	} else {
+		thd.expectedErrors = true
 	}
 
 	if nil == txn.Errors {
@@ -598,12 +649,13 @@ func errorAttributesMethod(err error) map[string]interface{} {
 	return nil
 }
 
-func errDataFromError(input error) (data errorData, err error) {
+func errDataFromError(input error, expect bool) (data errorData, err error) {
 	cause := errorCause(input)
 
 	data = errorData{
-		When: time.Now(),
-		Msg:  input.Error(),
+		When:   time.Now(),
+		Msg:    input.Error(),
+		Expect: expect,
 	}
 
 	if c := errorClassMethod(input); "" != c {
@@ -655,7 +707,7 @@ func errDataFromError(input error) (data errorData, err error) {
 	return data, nil
 }
 
-func (thd *thread) NoticeError(input error) error {
+func (thd *thread) NoticeError(input error, expect bool) error {
 	txn := thd.txn
 	txn.Lock()
 	defer txn.Unlock()
@@ -668,7 +720,7 @@ func (thd *thread) NoticeError(input error) error {
 		return errNilError
 	}
 
-	data, err := errDataFromError(input)
+	data, err := errDataFromError(input, expect)
 	if nil != err {
 		return err
 	}
@@ -677,7 +729,7 @@ func (thd *thread) NoticeError(input error) error {
 		data.ExtraAttributes = nil
 	}
 
-	return thd.noticeErrorInternal(data)
+	return thd.noticeErrorInternal(data, expect)
 }
 
 func (txn *txn) SetName(name string) error {

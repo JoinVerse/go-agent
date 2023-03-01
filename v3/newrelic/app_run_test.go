@@ -46,10 +46,10 @@ func TestResponseCodeIsError(t *testing.T) {
 }
 
 func TestCrossAppTracingEnabled(t *testing.T) {
-	// CAT should be enabled by default.
+	// CAT should NOT be enabled by default.
 	cfg := config{Config: defaultConfig()}
 	run := newAppRun(cfg, internal.ConnectReplyDefaults())
-	if enabled := run.Config.CrossApplicationTracer.Enabled; !enabled {
+	if enabled := run.Config.CrossApplicationTracer.Enabled; enabled {
 		t.Error(enabled)
 	}
 
@@ -129,7 +129,9 @@ func TestEmptyReplyEventHarvestDefaults(t *testing.T) {
 		maxTxnEvents:    internal.MaxTxnEvents,
 		maxCustomEvents: internal.MaxCustomEvents,
 		maxErrorEvents:  internal.MaxErrorEvents,
-		maxSpanEvents:   maxSpanEvents,
+		maxSpanEvents:   run.Config.DistributedTracer.ReservoirLimit,
+		maxLogEvents:    internal.MaxLogEvents,
+
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll: 60 * time.Second,
 			0:               60 * time.Second,
@@ -144,9 +146,13 @@ func TestEventHarvestFieldsAllPopulated(t *testing.T) {
 				"harvest_limits": {
 					"analytic_event_data": 1,
 					"custom_event_data": 2,
-					"span_event_data": 3,
+					"log_event_data": 3,
 					"error_event_data": 4
 				}
+			},
+			"span_event_harvest_config":{
+				"report_period_ms": 10000,
+				"harvest_limit": 5
 			}
 		}}`), internal.PreconnectReply{})
 	if nil != err {
@@ -156,8 +162,9 @@ func TestEventHarvestFieldsAllPopulated(t *testing.T) {
 	assertHarvestConfig(t, run.harvestConfig, expectHarvestConfig{
 		maxTxnEvents:    1,
 		maxCustomEvents: 2,
+		maxLogEvents:    3,
 		maxErrorEvents:  4,
-		maxSpanEvents:   3,
+		maxSpanEvents:   5,
 		periods: map[harvestTypes]time.Duration{
 			harvestMetricsTraces: 60 * time.Second,
 			harvestTypesEvents:   5 * time.Second,
@@ -178,8 +185,9 @@ func TestZeroReportPeriod(t *testing.T) {
 	assertHarvestConfig(t, run.harvestConfig, expectHarvestConfig{
 		maxTxnEvents:    internal.MaxTxnEvents,
 		maxCustomEvents: internal.MaxCustomEvents,
+		maxLogEvents:    internal.MaxLogEvents,
 		maxErrorEvents:  internal.MaxErrorEvents,
-		maxSpanEvents:   maxSpanEvents,
+		maxSpanEvents:   defaultMaxSpanEvents,
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll: 60 * time.Second,
 			0:               60 * time.Second,
@@ -187,11 +195,11 @@ func TestZeroReportPeriod(t *testing.T) {
 	})
 }
 
-func TestEventHarvestFieldsOnlySpanEvents(t *testing.T) {
+func TestConnectResponseOnlySpanEvents(t *testing.T) {
 	reply, err := internal.UnmarshalConnectReply([]byte(`{"return_value":{
-			"event_harvest_config": {
-				"report_period_ms": 5000,
-				"harvest_limits": { "span_event_data": 3 }
+			"span_event_harvest_config":{
+				"report_period_ms": 10000,
+				"harvest_limit": 3
 			}}}`), internal.PreconnectReply{})
 	if nil != err {
 		t.Fatal(err)
@@ -200,11 +208,12 @@ func TestEventHarvestFieldsOnlySpanEvents(t *testing.T) {
 	assertHarvestConfig(t, run.harvestConfig, expectHarvestConfig{
 		maxTxnEvents:    internal.MaxTxnEvents,
 		maxCustomEvents: internal.MaxCustomEvents,
+		maxLogEvents:    internal.MaxLogEvents,
 		maxErrorEvents:  internal.MaxErrorEvents,
 		maxSpanEvents:   3,
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll ^ harvestSpanEvents: 60 * time.Second,
-			harvestSpanEvents:                   5 * time.Second,
+			2:                                   60 * time.Second,
 		},
 	})
 }
@@ -223,7 +232,8 @@ func TestEventHarvestFieldsOnlyTxnEvents(t *testing.T) {
 		maxTxnEvents:    3,
 		maxCustomEvents: internal.MaxCustomEvents,
 		maxErrorEvents:  internal.MaxErrorEvents,
-		maxSpanEvents:   maxSpanEvents,
+		maxSpanEvents:   run.Config.DistributedTracer.ReservoirLimit,
+		maxLogEvents:    internal.MaxLogEvents,
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll ^ harvestTxnEvents: 60 * time.Second,
 			harvestTxnEvents:                   5 * time.Second,
@@ -244,8 +254,9 @@ func TestEventHarvestFieldsOnlyErrorEvents(t *testing.T) {
 	assertHarvestConfig(t, run.harvestConfig, expectHarvestConfig{
 		maxTxnEvents:    internal.MaxTxnEvents,
 		maxCustomEvents: internal.MaxCustomEvents,
+		maxLogEvents:    internal.MaxLogEvents,
 		maxErrorEvents:  3,
-		maxSpanEvents:   maxSpanEvents,
+		maxSpanEvents:   run.Config.DistributedTracer.ReservoirLimit,
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll ^ harvestErrorEvents: 60 * time.Second,
 			harvestErrorEvents:                   5 * time.Second,
@@ -266,15 +277,15 @@ func TestEventHarvestFieldsOnlyCustomEvents(t *testing.T) {
 	assertHarvestConfig(t, run.harvestConfig, expectHarvestConfig{
 		maxTxnEvents:    internal.MaxTxnEvents,
 		maxCustomEvents: 3,
+		maxLogEvents:    internal.MaxLogEvents,
 		maxErrorEvents:  internal.MaxErrorEvents,
-		maxSpanEvents:   maxSpanEvents,
+		maxSpanEvents:   run.Config.DistributedTracer.ReservoirLimit,
 		periods: map[harvestTypes]time.Duration{
 			harvestTypesAll ^ harvestCustomEvents: 60 * time.Second,
 			harvestCustomEvents:                   5 * time.Second,
 		},
 	})
 }
-
 func TestConfigurableHarvestNegativeReportPeriod(t *testing.T) {
 	h, err := internal.UnmarshalConnectReply([]byte(`{"return_value":{
 			"event_harvest_config": {
@@ -366,9 +377,13 @@ type expectHarvestConfig struct {
 	maxCustomEvents int
 	maxErrorEvents  int
 	maxSpanEvents   int
+	maxLogEvents    int
 	periods         map[harvestTypes]time.Duration
 }
 
+func errorExpectNotEqualActual(value string, actual, expect interface{}) error {
+	return fmt.Errorf("Expected %s value does not match actual; actual: %+v expect: %+v", value, actual, expect)
+}
 func assertHarvestConfig(t testing.TB, hc harvestConfig, expect expectHarvestConfig) {
 	if h, ok := t.(interface {
 		Helper()
@@ -376,19 +391,22 @@ func assertHarvestConfig(t testing.TB, hc harvestConfig, expect expectHarvestCon
 		h.Helper()
 	}
 	if max := hc.MaxTxnEvents; max != expect.maxTxnEvents {
-		t.Error(max, expect.maxTxnEvents)
+		t.Error(errorExpectNotEqualActual("maxTxnEvents", max, expect.maxTxnEvents))
 	}
 	if max := hc.MaxCustomEvents; max != expect.maxCustomEvents {
-		t.Error(max, expect.maxCustomEvents)
+		t.Error(errorExpectNotEqualActual("MaxCustomEvents", max, expect.maxCustomEvents))
 	}
 	if max := hc.MaxSpanEvents; max != expect.maxSpanEvents {
-		t.Error(max, expect.maxSpanEvents)
+		t.Error(errorExpectNotEqualActual("MaxSpanEvents", max, expect.maxSpanEvents))
 	}
 	if max := hc.MaxErrorEvents; max != expect.maxErrorEvents {
-		t.Error(max, expect.maxErrorEvents)
+		t.Error(errorExpectNotEqualActual("MaxErrorEvents", max, expect.maxErrorEvents))
+	}
+	if max := hc.LoggingConfig.maxLogEvents; max != expect.maxLogEvents {
+		t.Error(errorExpectNotEqualActual("MaxLogEvents", max, expect.maxErrorEvents))
 	}
 	if periods := hc.ReportPeriods; !reflect.DeepEqual(periods, expect.periods) {
-		t.Error(periods, expect.periods)
+		t.Error(errorExpectNotEqualActual("ReportPeriods", periods, expect.periods))
 	}
 }
 

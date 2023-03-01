@@ -109,7 +109,7 @@ func newAppRun(config config, reply *internal.ConnectReply) *appRun {
 		reply.SamplingTarget,
 		time.Now())
 
-	if "" != run.Reply.RunID {
+	if run.Reply.RunID != "" {
 		js, _ := json.Marshal(settings(run.Config.Config))
 		run.Config.Logger.Debug("final configuration", map[string]interface{}{
 			"config": jsonString(js),
@@ -122,6 +122,7 @@ func newAppRun(config config, reply *internal.ConnectReply) *appRun {
 		MaxCustomEvents: run.MaxCustomEvents(),
 		MaxErrorEvents:  run.MaxErrorEvents(),
 		MaxSpanEvents:   run.MaxSpanEvents(),
+		LoggingConfig:   run.LoggingConfig(),
 	}
 
 	return run
@@ -148,13 +149,13 @@ func newServerlessConnectReply(config config) *internal.ConnectReply {
 	reply.TrustedAccountKey = config.ServerlessMode.TrustedAccountKey
 	reply.PrimaryAppID = config.ServerlessMode.PrimaryAppID
 
-	if "" == reply.TrustedAccountKey {
+	if reply.TrustedAccountKey == "" {
 		// The trust key does not need to be provided by customers whose
 		// account ID is the same as the trust key.
 		reply.TrustedAccountKey = reply.AccountID
 	}
 
-	if "" == reply.PrimaryAppID {
+	if reply.PrimaryAppID == "" {
 		reply.PrimaryAppID = serverlessDefaultPrimaryAppID
 	}
 
@@ -187,20 +188,42 @@ func (run *appRun) txnTraceThreshold(apdexThreshold time.Duration) time.Duration
 
 func (run *appRun) ptrTxnEvents() *uint    { return run.Reply.EventData.Limits.TxnEvents }
 func (run *appRun) ptrCustomEvents() *uint { return run.Reply.EventData.Limits.CustomEvents }
+func (run *appRun) ptrLogEvents() *uint    { return run.Reply.EventData.Limits.LogEvents }
 func (run *appRun) ptrErrorEvents() *uint  { return run.Reply.EventData.Limits.ErrorEvents }
-func (run *appRun) ptrSpanEvents() *uint   { return run.Reply.EventData.Limits.SpanEvents }
+func (run *appRun) ptrSpanEvents() *uint   { return run.Reply.SpanEventHarvestConfig.HarvestLimit }
 
 func (run *appRun) MaxTxnEvents() int { return run.limit(run.Config.maxTxnEvents(), run.ptrTxnEvents) }
 func (run *appRun) MaxCustomEvents() int {
 	return run.limit(internal.MaxCustomEvents, run.ptrCustomEvents)
 }
+func (run *appRun) MaxLogEvents() int {
+	return run.limit(internal.MaxLogEvents, run.ptrLogEvents)
+}
 func (run *appRun) MaxErrorEvents() int {
 	return run.limit(internal.MaxErrorEvents, run.ptrErrorEvents)
 }
-func (run *appRun) MaxSpanEvents() int { return run.limit(maxSpanEvents, run.ptrSpanEvents) }
+
+func (run *appRun) LoggingConfig() (config loggingConfig) {
+	logging := run.Config.ApplicationLogging
+
+	config.loggingEnabled = logging.Enabled
+	config.collectEvents = logging.Enabled && logging.Forwarding.Enabled && !run.Config.HighSecurity
+	config.maxLogEvents = run.MaxLogEvents()
+	config.collectMetrics = logging.Enabled && logging.Metrics.Enabled
+	config.localEnrichment = logging.Enabled && logging.LocalDecorating.Enabled
+
+	return config
+}
+
+// MaxSpanEvents returns the reservoir limit for collected span events,
+// which will be the default or the user's configured size (if any), but
+// may be capped to the maximum allowed by the collector.
+func (run *appRun) MaxSpanEvents() int {
+	return run.limit(run.Config.DistributedTracer.ReservoirLimit, run.ptrSpanEvents)
+}
 
 func (run *appRun) limit(dflt int, field func() *uint) int {
-	if nil != field() {
+	if field() != nil {
 		return int(*field())
 	}
 	return dflt
@@ -213,10 +236,11 @@ func (run *appRun) ReportPeriods() map[harvestTypes]time.Duration {
 	for tp, fn := range map[harvestTypes]func() *uint{
 		harvestTxnEvents:    run.ptrTxnEvents,
 		harvestCustomEvents: run.ptrCustomEvents,
+		harvestLogEvents:    run.ptrLogEvents,
 		harvestErrorEvents:  run.ptrErrorEvents,
 		harvestSpanEvents:   run.ptrSpanEvents,
 	} {
-		if nil != run && fn() != nil {
+		if run != nil && fn() != nil {
 			configurable |= tp
 		} else {
 			fixed |= tp

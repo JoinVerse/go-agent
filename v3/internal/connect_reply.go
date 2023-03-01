@@ -104,7 +104,8 @@ type ConnectReply struct {
 	} `json:"agent_config"`
 
 	// Faster Event Harvest
-	EventData EventHarvestConfig `json:"event_harvest_config"`
+	EventData              EventHarvestConfig `json:"event_harvest_config"`
+	SpanEventHarvestConfig `json:"span_event_harvest_config"`
 }
 
 // EventHarvestConfig contains fields relating to faster event harvest.
@@ -118,9 +119,16 @@ type EventHarvestConfig struct {
 	Limits         struct {
 		TxnEvents    *uint `json:"analytic_event_data,omitempty"`
 		CustomEvents *uint `json:"custom_event_data,omitempty"`
+		LogEvents    *uint `json:"log_event_data,omitempty"`
 		ErrorEvents  *uint `json:"error_event_data,omitempty"`
 		SpanEvents   *uint `json:"span_event_data,omitempty"`
 	} `json:"harvest_limits"`
+}
+
+// SpanEventHarvestConfig contains the Reporting period time and the given harvest limit.
+type SpanEventHarvestConfig struct {
+	ReportPeriod *uint `json:"report_period_ms"`
+	HarvestLimit *uint `json:"harvest_limit"`
 }
 
 // ConfigurablePeriod returns the Faster Event Harvest configurable reporting period if it is set, or the default
@@ -136,12 +144,23 @@ func (r *ConnectReply) ConfigurablePeriod() time.Duration {
 func uintPtr(x uint) *uint { return &x }
 
 // DefaultEventHarvestConfig provides faster event harvest defaults.
-func DefaultEventHarvestConfig(maxTxnEvents int) EventHarvestConfig {
+func DefaultEventHarvestConfig(maxTxnEvents, maxLogEvents, maxCustomEvents int) EventHarvestConfig {
 	cfg := EventHarvestConfig{}
 	cfg.ReportPeriodMs = DefaultConfigurableEventHarvestMs
 	cfg.Limits.TxnEvents = uintPtr(uint(maxTxnEvents))
-	cfg.Limits.CustomEvents = uintPtr(uint(MaxCustomEvents))
+	cfg.Limits.CustomEvents = uintPtr(uint(maxCustomEvents))
+	cfg.Limits.LogEvents = uintPtr(uint(maxLogEvents))
 	cfg.Limits.ErrorEvents = uintPtr(uint(MaxErrorEvents))
+	return cfg
+}
+
+// DefaultEventHarvestConfigWithDT is an extended version of DefaultEventHarvestConfig,
+// with the addition that it takes into account distributed tracer span event harvest limits.
+func DefaultEventHarvestConfigWithDT(maxTxnEvents, maxLogEvents, maxCustomEvents, spanEventLimit int, dtEnabled bool) EventHarvestConfig {
+	cfg := DefaultEventHarvestConfig(maxTxnEvents, maxLogEvents, maxCustomEvents)
+	if dtEnabled {
+		cfg.Limits.SpanEvents = uintPtr(uint(spanEventLimit))
+	}
 	return cfg
 }
 
@@ -234,6 +253,33 @@ func CreateFullTxnName(input string, reply *ConnectReply, isWeb bool) string {
 	}
 
 	return reply.SegmentTerms.apply(afterNameRules)
+}
+
+// RequestEventLimits sets limits for reservior testing
+type RequestEventLimits struct {
+	CustomEvents int
+}
+
+const (
+	// CustomEventHarvestsPerMinute is the number of times per minute custom events are harvested
+	CustomEventHarvestsPerMinute = 5
+)
+
+// MockConnectReplyEventLimits sets up a mock connect reply to test event limits
+// currently only verifies custom insights events
+func (r *ConnectReply) MockConnectReplyEventLimits(limits *RequestEventLimits) {
+	r.SetSampleEverything()
+
+	r.EventData.Limits.CustomEvents = uintPtr(uint(limits.CustomEvents) / (60 / CustomEventHarvestsPerMinute))
+
+	// The mock server will be limited to a maximum of 100,000 events per minute
+	if limits.CustomEvents > 100000 {
+		r.EventData.Limits.CustomEvents = uintPtr(uint(100000) / (60 / CustomEventHarvestsPerMinute))
+	}
+
+	if limits.CustomEvents <= 0 {
+		r.EventData.Limits.CustomEvents = uintPtr(uint(0) / (60 / CustomEventHarvestsPerMinute))
+	}
 }
 
 // SetSampleEverything is used for testing to ensure span events get saved.

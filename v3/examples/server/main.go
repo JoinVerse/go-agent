@@ -31,6 +31,13 @@ func noticeError(w http.ResponseWriter, r *http.Request) {
 	txn.NoticeError(errors.New("my error message"))
 }
 
+func noticeExpectedError(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, "noticing an error")
+
+	txn := newrelic.FromContext(r.Context())
+	txn.NoticeExpectedError(errors.New("my expected error message"))
+}
+
 func noticeErrorWithAttributes(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "noticing an error")
 
@@ -168,7 +175,7 @@ func external(w http.ResponseWriter, r *http.Request) {
 	resp, err := http.DefaultClient.Do(req)
 	es.End()
 
-	if nil != err {
+	if err != nil {
 		io.WriteString(w, err.Error())
 		return
 	}
@@ -199,7 +206,7 @@ func roundtripper(w http.ResponseWriter, r *http.Request) {
 	//	request = newrelic.RequestWithTransactionContext(request, txn)
 
 	resp, err := client.Do(request)
-	if nil != err {
+	if err != nil {
 		io.WriteString(w, err.Error())
 		return
 	}
@@ -246,13 +253,26 @@ func browser(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "browser header page")
 }
 
+func logTxnMessage(w http.ResponseWriter, r *http.Request) {
+	txn := newrelic.FromContext(r.Context())
+	txn.RecordLog(newrelic.LogData{
+		Message:  "Log Message",
+		Severity: "info",
+	})
+
+	io.WriteString(w, "A log message was recorded")
+}
+
 func main() {
 	app, err := newrelic.NewApplication(
 		newrelic.ConfigAppName("Example App"),
 		newrelic.ConfigFromEnvironment(),
 		newrelic.ConfigDebugLogger(os.Stdout),
+		newrelic.ConfigAppLogForwardingEnabled(true),
+		newrelic.ConfigCodeLevelMetricsEnabled(true),
+		newrelic.ConfigCodeLevelMetricsPathPrefix("go-agent/v3"),
 	)
-	if nil != err {
+	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -260,6 +280,7 @@ func main() {
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/", index))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/version", versionHandler))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_error", noticeError))
+	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_expected_error", noticeExpectedError))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_error_with_attributes", noticeErrorWithAttributes))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/custom_event", customEvent))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/set_name", setName))
@@ -274,15 +295,30 @@ func main() {
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/browser", browser))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/async", async))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/message", message))
+	http.HandleFunc(newrelic.WrapHandleFunc(app, "/log", logTxnMessage))
 
+	//loc := newrelic.ThisCodeLocation()
+	backgroundCache := newrelic.NewCachedCodeLocation()
 	http.HandleFunc("/background", func(w http.ResponseWriter, req *http.Request) {
 		// Transactions started without an http.Request are classified as
 		// background transactions.
-		txn := app.StartTransaction("background")
+		txn := app.StartTransaction("background", backgroundCache.WithThisCodeLocation())
 		defer txn.End()
 
 		io.WriteString(w, "background transaction")
 		time.Sleep(150 * time.Millisecond)
+	})
+
+	http.HandleFunc("/background_log", func(w http.ResponseWriter, req *http.Request) {
+		// Logs that occur outside of a transaction are classified as
+		// background logs.
+
+		app.RecordLog(newrelic.LogData{
+			Message:  "Background Log Message",
+			Severity: "info",
+		})
+
+		io.WriteString(w, "A background log message was recorded")
 	})
 
 	http.ListenAndServe(":8000", nil)

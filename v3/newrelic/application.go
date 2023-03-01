@@ -16,11 +16,11 @@ type Application struct {
 }
 
 // StartTransaction begins a Transaction with the given name.
-func (app *Application) StartTransaction(name string) *Transaction {
+func (app *Application) StartTransaction(name string, opts ...TraceOption) *Transaction {
 	if nil == app {
 		return nil
 	}
-	return app.app.StartTransaction(name)
+	return app.app.StartTransaction(name, opts...)
 }
 
 // RecordCustomEvent adds a custom event.
@@ -70,6 +70,29 @@ func (app *Application) RecordCustomMetric(name string, value float64) {
 		app.app.Error("unable to record custom metric", map[string]interface{}{
 			"metric-name": name,
 			"reason":      err.Error(),
+		})
+	}
+}
+
+// RecordLog records the data from a single log line.
+// This consumes a LogData object that should be configured
+// with data taken from a logging framework.
+//
+// Certian parts of this feature can be turned off based on your
+// config settings. Record log is capable of recording log events,
+// as well as log metrics depending on how your application is
+// configured.
+func (app *Application) RecordLog(logEvent LogData) {
+	if nil == app {
+		return
+	}
+	if nil == app.app {
+		return
+	}
+	err := app.app.RecordLog(&logEvent)
+	if err != nil {
+		app.app.Error("unable to record log", map[string]interface{}{
+			"reason": err.Error(),
 		})
 	}
 }

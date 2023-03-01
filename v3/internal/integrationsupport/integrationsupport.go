@@ -34,6 +34,7 @@ func AddAgentSpanAttribute(txn *newrelic.Transaction, key string, val string) {
 const (
 	testLicenseKey = "0123456789012345678901234567890123456789"
 	SampleAppName  = "my app"
+	TestEntityGUID = "testEntityGUID123"
 )
 
 // ExpectApp combines Application and Expect, for use in validating data in test apps
@@ -93,7 +94,17 @@ var DTEnabledCfgFn = func(cfg *newrelic.Config) {
 	cfg.DistributedTracer.Enabled = true
 }
 
+// AppLogEnabledCfgFn enables application logging features
+var AppLogEnabledCfgFn = func(cfg *newrelic.Config) {
+	cfg.Enabled = false
+	cfg.ApplicationLogging.Enabled = true
+	cfg.ApplicationLogging.Forwarding.Enabled = true
+	cfg.ApplicationLogging.Metrics.Enabled = true
+}
+
 // SampleEverythingReplyFn is a reusable ConnectReply function that samples everything
 var SampleEverythingReplyFn = func(reply *internal.ConnectReply) {
 	reply.SetSampleEverything()
+	reply.EntityGUID = TestEntityGUID
+	reply.EventData = internal.DefaultEventHarvestConfig(internal.MaxTxnEvents, internal.MaxLogEvents, internal.MaxCustomEvents)
 }
